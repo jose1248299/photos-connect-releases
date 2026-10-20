@@ -1,0 +1,183 @@
+name: Stage verified Photos Connect installers
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: photos-connect-v0.1.0-draft-installers
+  cancel-in-progress: false
+
+jobs:
+  stage_installers:
+    if: github.repository == 'jose1248299/photos-connect-releases' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - name: Verify archives and stage only the approved installers in the existing draft
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          MAC_ARM64_ARTIFACT_URL: ${{ secrets.MAC_ARM64_ARTIFACT_URL }}
+          MAC_INTEL_ARTIFACT_URL: ${{ secrets.MAC_INTEL_ARTIFACT_URL }}
+          WINDOWS_ARTIFACT_URL: ${{ secrets.WINDOWS_ARTIFACT_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import stat
+          import subprocess
+          import tempfile
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          import zipfile
+
+          REPOSITORY = "jose1248299/photos-connect-releases"
+          RELEASE_ID = 418695199
+          TAG = "v0.1.0"
+          SPECS = (
+              {"secret": "MAC_ARM64_ARTIFACT_URL", "zipBytes": 254373375,
+               "zipSha": "0a420be0db828f8b4f093f1d38a1d5fb2baf07927dc4f13c188c38e9f95f1ba3",
+               "name": "Photos-Connect-distribution-0.1.0-mac-arm64.dmg", "bytes": 129793160,
+               "sha": "21ac83ea4b1b17acf1f4b61db22687185c4c133c8058f5e68dcdc378bedd1dd4"},
+              {"secret": "MAC_INTEL_ARTIFACT_URL", "zipBytes": 268051406,
+               "zipSha": "a291d04d02bd2d431079f2a64395854498041ec103b260fc31ea40e713850b31",
+               "name": "Photos-Connect-distribution-0.1.0-mac-x64.dmg", "bytes": 136613882,
+               "sha": "5dea923b5f4e39b70936061972b83224e2e6663d50b7796c74fac02a4f3c5ebe"},
+              {"secret": "WINDOWS_ARTIFACT_URL", "zipBytes": 119818290,
+               "zipSha": "a7e113617ba9cea6429ee992982644f0236d1d084b1c8d4955b9300de5090063",
+               "name": "Photos-Connect-evaluation-0.1.0-win-x64.exe", "bytes": 119810428,
+               "sha": "94f5da8c48a64b4e1a7071d670271367f904ee54e87ff9b4cbfbd4b8fe7e8585"},
+          )
+
+          class ControlledError(Exception):
+              pass
+
+          def require(condition, message):
+              if not condition:
+                  raise ControlledError(message)
+
+          def api(path, *, data=None):
+              host = "uploads.github.com" if data is not None else "api.github.com"
+              request = urllib.request.Request(
+                  f"https://{host}/repos/{REPOSITORY}/{path}",
+                  data=data,
+                  method="POST" if data is not None else "GET",
+                  headers={
+                      "Authorization": "Bearer " + os.environ["GITHUB_TOKEN"],
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "Content-Type": "application/octet-stream" if data is not None else "application/json",
+                      "User-Agent": "Photos-Connect-verified-draft-installer-staging",
+                  },
+              )
+              with urllib.request.urlopen(request, timeout=600) as response:
+                  return json.load(response)
+
+          def draft():
+              release = api(f"releases/{RELEASE_ID}")
+              require(release.get("id") == RELEASE_ID and release.get("tag_name") == TAG
+                      and release.get("draft") is True, "The exact existing release must remain a draft.")
+              return release
+
+          def existing(release, spec):
+              matches = [asset for asset in release.get("assets", []) if asset.get("name") == spec["name"]]
+              require(len(matches) <= 1, "Duplicate asset names require operator review.")
+              if not matches:
+                  return False
+              asset = matches[0]
+              require(asset.get("state") == "uploaded" and asset.get("size") == spec["bytes"]
+                      and asset.get("digest") == "sha256:" + spec["sha"],
+                      "An existing installer has a different or unavailable digest; it will not be replaced.")
+              return True
+
+          def digest(path):
+              value = hashlib.sha256()
+              with path.open("rb") as source:
+                  for block in iter(lambda: source.read(1024 * 1024), b""):
+                      value.update(block)
+              return value.hexdigest()
+
+          def prepare(spec, directory):
+              url = os.environ.get(spec["secret"], "")
+              parsed = urllib.parse.urlsplit(url)
+              require(parsed.scheme == "https" and bool(parsed.netloc) and not parsed.username
+                      and not parsed.password, "A required HTTPS artifact download URL is missing or invalid.")
+              archive = directory / (spec["secret"] + ".zip")
+              # No URL, redirect, response body or curl diagnostic is written to logs.
+              download = subprocess.run(
+                  ["curl", "--disable", "--proto", "=https", "--proto-redir", "=https",
+                   "--location", "--fail", "--silent", "--show-error", "--connect-timeout", "30",
+                   "--max-time", "900", "--max-filesize", str(spec["zipBytes"]),
+                   "--output", str(archive), "--url", url],
+                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+              )
+              require(download.returncode == 0, "An artifact download failed; URLs and response bodies are withheld.")
+              require(archive.stat().st_size == spec["zipBytes"] and digest(archive) == spec["zipSha"],
+                      "Artifact ZIP size or SHA-256 did not match the approved source artifact.")
+              target = directory / "dist" / spec["name"]
+              target.parent.mkdir(exist_ok=True)
+              with zipfile.ZipFile(archive) as package:
+                  matches = [entry for entry in package.infolist() if entry.filename == spec["name"]]
+                  require(len(matches) == 1, "The exact installer basename must occur once in its ZIP.")
+                  entry = matches[0]
+                  require(not entry.is_dir() and not stat.S_ISLNK(entry.external_attr >> 16)
+                          and entry.file_size == spec["bytes"], "The installer entry is not the approved regular file.")
+                  value = hashlib.sha256()
+                  size = 0
+                  # Only this exact basename is streamed out; no extractall or archive paths are used.
+                  with package.open(entry) as source, target.open("xb") as destination:
+                      for block in iter(lambda: source.read(1024 * 1024), b""):
+                          size += len(block)
+                          require(size <= spec["bytes"], "Installer exceeds its approved size.")
+                          value.update(block)
+                          destination.write(block)
+                  require(size == spec["bytes"] and value.hexdigest() == spec["sha"],
+                          "Installer size or SHA-256 did not match the approved distribution.")
+              return target
+
+          def main():
+              require(os.environ.get("GITHUB_REPOSITORY") == REPOSITORY
+                      and os.environ.get("GITHUB_REF") == "refs/heads/main"
+                      and os.environ.get("GITHUB_EVENT_NAME") == "workflow_dispatch",
+                      "Only a manual main-branch run in the installer repository is permitted.")
+              initial = draft()  # Confirm this before reading download secrets or downloading anything.
+              pending = [spec for spec in SPECS if not existing(initial, spec)]
+              with tempfile.TemporaryDirectory(prefix="photos-connect-installers-", dir=os.environ["RUNNER_TEMP"]) as temporary:
+                  directory = Path(temporary)
+                  prepared = [(spec, prepare(spec, directory)) for spec in pending]
+                  for spec, path in prepared:
+                      if existing(draft(), spec):
+                          print("Already present with the approved digest: " + spec["name"])
+                          continue
+                      endpoint = f"releases/{RELEASE_ID}/assets?" + urllib.parse.urlencode({"name": spec["name"]})
+                      try:
+                          api(endpoint, data=path.read_bytes())
+                      except urllib.error.HTTPError as error:
+                          # A concurrent same-name upload may win the race. Never delete or clobber it.
+                          if error.code != 422 or not existing(draft(), spec):
+                              raise ControlledError("Installer upload failed; no existing assets were removed.") from None
+                      require(existing(draft(), spec), "Uploaded installer digest could not be verified.")
+                      print("Verified installer staged in the draft: " + spec["name"])
+              final = draft()
+              require(all(existing(final, spec) for spec in SPECS), "All three installers must be verified in the draft.")
+              print("All three approved installers are staged. The release remains a draft; nothing was published.")
+
+          try:
+              main()
+          except ControlledError as error:
+              print("::error::" + str(error))
+              raise SystemExit(1)
+          except Exception as error:
+              # Unexpected provider errors can contain request details; do not expose their text.
+              print("::error::Installer staging failed (" + type(error).__name__ + "); no release publication was attempted.")
+              raise SystemExit(1)
+          PY
