@@ -117,10 +117,12 @@ jobs:
                   ["curl", "--disable", "--proto", "=https", "--proto-redir", "=https",
                    "--location", "--fail", "--silent", "--show-error", "--connect-timeout", "30",
                    "--max-time", "900", "--max-filesize", str(spec["zipBytes"]),
-                   "--output", str(archive), "--url", url],
-                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False,
+                   "--output", str(archive), "--write-out", "%{http_code}", "--url", url],
+                  stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False,
               )
-              require(download.returncode == 0, "An artifact download failed; URLs and response bodies are withheld.")
+              http_status = int(download.stdout.strip() or "0")
+              require(download.returncode == 0,
+                      f"An artifact download failed (curl exit {download.returncode}, HTTP {http_status}); URLs and bodies are withheld.")
               require(archive.stat().st_size == spec["zipBytes"] and digest(archive) == spec["zipSha"],
                       "Artifact ZIP size or SHA-256 did not match the approved source artifact.")
               target = directory / "dist" / spec["name"]
