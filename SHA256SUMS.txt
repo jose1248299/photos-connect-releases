@@ -1,0 +1,3 @@
+21ac83ea4b1b17acf1f4b61db22687185c4c133c8058f5e68dcdc378bedd1dd4  Photos-Connect-distribution-0.1.0-mac-arm64.dmg
+5dea923b5f4e39b70936061972b83224e2e6663d50b7796c74fac02a4f3c5ebe  Photos-Connect-distribution-0.1.0-mac-x64.dmg
+94f5da8c48a64b4e1a7071d670271367f904ee54e87ff9b4cbfbd4b8fe7e8585  Photos-Connect-evaluation-0.1.0-win-x64.exe
