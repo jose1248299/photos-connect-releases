@@ -107,7 +107,7 @@ jobs:
               return value.hexdigest()
 
           def prepare(spec, directory):
-              url = os.environ.get(spec["secret"], "")
+              url = os.environ.get(spec["secret"], "").strip()
               parsed = urllib.parse.urlsplit(url)
               require(parsed.scheme == "https" and bool(parsed.netloc) and not parsed.username
                       and not parsed.password, "A required HTTPS artifact download URL is missing or invalid.")
